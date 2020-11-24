@@ -216,6 +216,7 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 					break
 				}
 				s.client.RandomTime, s.client.Random = rspHs.ClientHello.GetRandom()
+				s.handshake.state = "recv-clienthello"
 				if rspHs.ClientHello.HasSessionId() {
 					//resuming a session
 					s.Identity = getIdentityFromCache(rspHs.ClientHello.GetSessionIdStr())
@@ -232,6 +233,7 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 						s.Psk = psk
 						s.initKeyBlock()
 
+						s.handshake.state = "finished"
 					} else {
 						logDebug(s.peer, "dtls: tried to resume session, but it was not found")
 						s.resumed = false
@@ -241,7 +243,6 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 				}
 				s.selectedCipherSuite = rspHs.ClientHello.SelectCipherSuite(s.listener.cipherSuites)
 				s.cipher = getCipher(s.peer, s.selectedCipherSuite)
-				s.handshake.state = "recv-clienthello"
 			}
 		case handshakeType_HelloVerifyRequest:
 			if len(s.handshake.cookie) == 0 {
@@ -300,7 +301,11 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 				err = errors.New("dtls: crypto verification failed")
 				break
 			}
-			s.handshake.state = "finished"
+			if s.resumed {
+				s.handshake.state = "finished-resume"
+			} else {
+				s.handshake.state = "finished"
+			}
 			break
 		default:
 			logWarn(s.peer, nil, "dtls: invalid handshake type [%v] received", rspRec.ContentType)
