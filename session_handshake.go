@@ -216,7 +216,6 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 					break
 				}
 				s.client.RandomTime, s.client.Random = rspHs.ClientHello.GetRandom()
-				s.handshake.state = "recv-clienthello"
 				if rspHs.ClientHello.HasSessionId() {
 					//resuming a session
 					s.Identity = getIdentityFromCache(rspHs.ClientHello.GetSessionIdStr())
@@ -233,7 +232,6 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 						s.Psk = psk
 						s.initKeyBlock()
 
-						s.handshake.state = "finished"
 					} else {
 						logDebug(s.peer, "dtls: tried to resume session, but it was not found")
 						s.resumed = false
@@ -243,6 +241,7 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 				}
 				s.selectedCipherSuite = rspHs.ClientHello.SelectCipherSuite(s.listener.cipherSuites)
 				s.cipher = getCipher(s.peer, s.selectedCipherSuite)
+				s.handshake.state = "recv-clienthello"
 			}
 		case handshakeType_HelloVerifyRequest:
 			if len(s.handshake.cookie) == 0 {
@@ -301,11 +300,7 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 				err = errors.New("dtls: crypto verification failed")
 				break
 			}
-			if s.resumed {
-				s.handshake.state = "finished-resume"
-			} else {
-				s.handshake.state = "finished"
-			}
+			s.handshake.state = "finished"
 			break
 		default:
 			logWarn(s.peer, nil, "dtls: invalid handshake type [%v] received", rspRec.ContentType)
@@ -330,16 +325,40 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 			}
 			s.resetHash()
 		case "recv-clienthello":
-			//TODO consider adding serverkeyexchange, not sure what to recommend as a server identity
-			reqHs = newHandshake(handshakeType_ServerHello)
-			reqHs.ServerHello.Init(s.server.Random, s.Id, s.selectedCipherSuite)
+			if s.resumed {
+				reqHs = newHandshake(handshakeType_ServerHello)
+				reqHs.ServerHello.Init(s.server.Random, s.Id, s.selectedCipherSuite)
+				err = s.writeHandshake(reqHs)
+				if err != nil {
+					break
+				}
 
-			reqHs2 := newHandshake(handshakeType_ServerHelloDone)
-			reqHs2.ServerHelloDone.Init()
+				rec := newRecord(ContentType_ChangeCipherSpec, s.getEpoch(), s.getNextSequence(), []byte{0x01})
+				s.incEpoch()
+				err = s.writeRecord(rec)
+				if err != nil {
+					break
+				}
+				s.encrypt = true
 
-			err = s.writeHandshakes([]*handshake{reqHs, reqHs2})
-			if err != nil {
-				break
+				reqHs = newHandshake(handshakeType_Finished)
+				reqHs.Finished.Init(s.keyBlock.MasterSecret, s.getHash(), "server")
+				err = s.writeHandshake(reqHs)
+				if err != nil {
+					break
+				}
+			} else {
+				//TODO consider adding serverkeyexchange, not sure what to recommend as a server identity
+				reqHs = newHandshake(handshakeType_ServerHello)
+				reqHs.ServerHello.Init(s.server.Random, s.Id, s.selectedCipherSuite)
+
+				reqHs2 := newHandshake(handshakeType_ServerHelloDone)
+				reqHs2.ServerHelloDone.Init()
+
+				err = s.writeHandshakes([]*handshake{reqHs, reqHs2})
+				if err != nil {
+					break
+				}
 			}
 		case "recv-helloverifyrequest":
 			reqHs = newHandshake(handshakeType_ClientHello)
@@ -390,7 +409,9 @@ func (s *session) processHandshakePacket(rspRec *record) error {
 				break
 			}
 		case "finished":
-			if s.Type == SessionType_Server {
+			if s.resumed {
+				// do nothing
+			} else if s.Type == SessionType_Server {
 				rec := newRecord(ContentType_ChangeCipherSpec, s.getEpoch(), s.getNextSequence(), []byte{0x01})
 				s.incEpoch()
 				err = s.writeRecord(rec)
